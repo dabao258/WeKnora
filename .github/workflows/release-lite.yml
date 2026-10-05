@@ -202,6 +202,21 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+            - name: Purge Go module cache (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          go clean -modcache
+          go clean -cache
+
+      - name: Use CN Go proxy (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct" >> "$GITHUB_ENV"
+          echo "GOSUMDB=sum.golang.google.cn" >> "$GITHUB_ENV"
+          echo "GOFLAGS=-mod=mod" >> "$GITHUB_ENV"
+
       - name: Pre-compile Go packages (Windows)
         if: runner.os == 'Windows'
         shell: bash
