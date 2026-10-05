@@ -165,11 +165,9 @@ jobs:
     env:
       CGO_ENABLED: 1
     steps:
-      # FIX(1): 禁止 checkout 做 CRLF 转换，避免 licenses/sources/modules.tsv
-      # 在 Windows 上被改成 CRLF，导致 check-license-bundle.sh 的 64 位校验失败。
+      # FIX(1): checkout@v6 不支持 autocrlf 输入，改为在下面用 sed 清理行尾
+      # （已验证有效：licenses/sources/modules.tsv 在 Windows 上被转成 CRLF）。
       - uses: actions/checkout@v6
-        with:
-          autocrlf: false
 
       - uses: actions/setup-go@v6
         with:
@@ -195,7 +193,8 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install nsis -y
 
-      # FIX(2): 兜底清理行尾。即使 checkout 缓存里已存在 CRLF 版本也能修好。
+      # FIX(2): 兜底清理行尾。Windows checkout 会把 modules.tsv 转成 CRLF，
+      # 导致 check-license-bundle.sh 的 64 位十六进制校验失败。
       - name: Normalize license manifest line endings (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -205,26 +204,25 @@ jobs:
           head -2 licenses/sources/modules.tsv | sed 's/\t/<TAB>/g; s/\r/<CR>/g'
 
       # FIX(3): Windows 的 CGO 需要 sqlite3.h / sqlite3ext.h。
-      # mattn/go-sqlite3 模块自带 SQLite amalgamation（含这两个头文件），
-      # 它也是 macOS/Linux 上该头文件的真实来源，因此这里直接复用，
-      # 不需要 choco/vcpkg 安装系统 SQLite 开发包。
-      - name: Provide SQLite headers from mattn/go-sqlite3 (Windows)
+      # mattn/go-sqlite3 模块只带 sqlite3-binding.h（无 sqlite3.h/sqlite3ext.h），
+      # 因此从 SQLite 官方 amalgamation 包取完整头文件（版本 3.53.4，与 mattn 内嵌版本一致）。
+      - name: Provide SQLite headers (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          go mod download github.com/mattn/go-sqlite3 || true
-          SQLITE_DIR="$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)"
-          echo "mattn/go-sqlite3 module dir: $SQLITE_DIR"
-          if [ ! -f "$SQLITE_DIR/sqlite3.h" ]; then
-            echo "ERROR: sqlite3.h missing in $SQLITE_DIR" >&2
-            ls -la "$SQLITE_DIR" | head -30 >&2 || true
-            exit 1
-          fi
-          INC="$(echo "$SQLITE_DIR" | sed 's|^/c|C:|')"
-          echo "SQLite include dir: $INC"
+          mkdir -p "$RUNNER_TEMP/sqlite-amalgamation"
+          cd "$RUNNER_TEMP/sqlite-amalgamation"
+          curl -sSL -o sqlite.zip https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip
+          pwsh -NoProfile -Command "Expand-Archive -Path 'sqlite.zip' -DestinationPath '.' -Force"
+          INC_DIR="$(find "$RUNNER_TEMP/sqlite-amalgamation" -name 'sqlite3ext.h' -exec dirname {} \; | head -1)"
+          echo "SQLite include dir: $INC_DIR"
+          ls -la "$INC_DIR" | head -20
+          for f in sqlite3.h sqlite3ext.h; do
+            [ -f "$INC_DIR/$f" ] || { echo "ERROR: $f not found in $INC_DIR" >&2; exit 1; }
+          done
           {
-            echo "CGO_CFLAGS=-Wno-deprecated-declarations -I$INC"
+            echo "CGO_CFLAGS=-Wno-deprecated-declarations -I$INC_DIR"
             echo "CGO_ENABLED=1"
           } >> "$GITHUB_ENV"
 
