@@ -204,28 +204,24 @@ jobs:
           echo "--- first 2 lines, TAB/CR made visible ---"
           head -2 licenses/sources/modules.tsv | sed 's/\t/<TAB>/g; s/\r/<CR>/g'
 
-      # FIX(3): Windows 的 CGO 需要 sqlite3.h / sqlite3ext.h
-      # （sqlite-vec-go-bindings 的 sqlite-vec.h 直接 include 了它们）
-      - name: Install SQLite dev headers (Windows)
-        if: runner.os == 'Windows'
-        run: choco install sqlite -y
-
-      - name: Extend CGO_CFLAGS with SQLite include dir (Windows)
+      # FIX(3): Windows 的 CGO 需要 sqlite3.h / sqlite3ext.h。
+      # mattn/go-sqlite3 模块自带 SQLite amalgamation（含这两个头文件），
+      # 它也是 macOS/Linux 上该头文件的真实来源，因此这里直接复用，
+      # 不需要 choco/vcpkg 安装系统 SQLite 开发包。
+      - name: Provide SQLite headers from mattn/go-sqlite3 (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          HDR="$(find /c/ProgramData/chocolatey /c/tools -name 'sqlite3.h' 2>/dev/null | head -1 || true)"
-          if [ -z "$HDR" ]; then
-            HDR="$(find /c/ProgramData/chocolatey /c/tools -name 'sqlite3ext.h' 2>/dev/null | head -1 || true)"
-          fi
-          if [ -z "$HDR" ]; then
-            echo "ERROR: sqlite3.h not found after 'choco install sqlite'" >&2
-            echo "Dumping candidate trees for debugging:" >&2
-            ls -R /c/ProgramData/chocolatey/lib/sqlite 2>/dev/null | head -50 >&2 || true
+          go mod download github.com/mattn/go-sqlite3 || true
+          SQLITE_DIR="$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)"
+          echo "mattn/go-sqlite3 module dir: $SQLITE_DIR"
+          if [ ! -f "$SQLITE_DIR/sqlite3.h" ]; then
+            echo "ERROR: sqlite3.h missing in $SQLITE_DIR" >&2
+            ls -la "$SQLITE_DIR" | head -30 >&2 || true
             exit 1
           fi
-          INC="$(dirname "$HDR" | sed 's|^/c|C:|')"
+          INC="$(echo "$SQLITE_DIR" | sed 's|^/c|C:|')"
           echo "SQLite include dir: $INC"
           {
             echo "CGO_CFLAGS=-Wno-deprecated-declarations -I$INC"
