@@ -165,7 +165,11 @@ jobs:
     env:
       CGO_ENABLED: 1
     steps:
+      # FIX(1): 禁止 checkout 做 CRLF 转换，避免 licenses/sources/modules.tsv
+      # 在 Windows 上被改成 CRLF，导致 check-license-bundle.sh 的 64 位校验失败。
       - uses: actions/checkout@v6
+        with:
+          autocrlf: false
 
       - uses: actions/setup-go@v6
         with:
@@ -191,6 +195,43 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install nsis -y
 
+      # FIX(2): 兜底清理行尾。即使 checkout 缓存里已存在 CRLF 版本也能修好。
+      - name: Normalize license manifest line endings (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          sed -i 's/\r$//' licenses/sources/modules.tsv
+          echo "--- first 2 lines, TAB/CR made visible ---"
+          head -2 licenses/sources/modules.tsv | sed 's/\t/<TAB>/g; s/\r/<CR>/g'
+
+      # FIX(3): Windows 的 CGO 需要 sqlite3.h / sqlite3ext.h
+      # （sqlite-vec-go-bindings 的 sqlite-vec.h 直接 include 了它们）
+      - name: Install SQLite dev headers (Windows)
+        if: runner.os == 'Windows'
+        run: choco install sqlite -y
+
+      - name: Extend CGO_CFLAGS with SQLite include dir (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          HDR="$(find /c/ProgramData/chocolatey /c/tools -name 'sqlite3.h' 2>/dev/null | head -1 || true)"
+          if [ -z "$HDR" ]; then
+            HDR="$(find /c/ProgramData/chocolatey /c/tools -name 'sqlite3ext.h' 2>/dev/null | head -1 || true)"
+          fi
+          if [ -z "$HDR" ]; then
+            echo "ERROR: sqlite3.h not found after 'choco install sqlite'" >&2
+            echo "Dumping candidate trees for debugging:" >&2
+            ls -R /c/ProgramData/chocolatey/lib/sqlite 2>/dev/null | head -50 >&2 || true
+            exit 1
+          fi
+          INC="$(dirname "$HDR" | sed 's|^/c|C:|')"
+          echo "SQLite include dir: $INC"
+          {
+            echo "CGO_CFLAGS=-Wno-deprecated-declarations -I$INC"
+            echo "CGO_ENABLED=1"
+          } >> "$GITHUB_ENV"
+
       - name: Resolve version
         id: ver
         shell: bash
@@ -202,6 +243,7 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      # 仅 Windows：清掉可能被污染的模块缓存，并改用国内代理加速
       - name: Purge Go module cache (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -214,17 +256,17 @@ jobs:
         shell: bash
         run: |
           echo "GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct" >> "$GITHUB_ENV"
-          echo "GOSUMDB=sum.golang.google.cn" >> "$GITHUB_ENV"
           echo "GOFLAGS=-mod=mod" >> "$GITHUB_ENV"
 
+      # FIX(4): 去掉 || true，让 CGO 错误在这里就暴露，而不是拖到 wails build
       - name: Pre-compile Go packages (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
-          export CGO_CFLAGS="-Wno-deprecated-declarations"
+          export CGO_CFLAGS="${CGO_CFLAGS:--Wno-deprecated-declarations}"
           cd cmd/desktop
-          go build -p 1 -buildvcs=false -tags "desktop,sqlite_fts5,production" -o _prebuild_tmp.exe . || true
+          go build -p 1 -buildvcs=false -tags "desktop,sqlite_fts5,production" -o _prebuild_tmp.exe .
           rm -f _prebuild_tmp.exe
 
       - name: Build desktop app
@@ -234,7 +276,7 @@ jobs:
           export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
           eval "$(./scripts/get_version.sh env)"
           LDFLAGS="$(./scripts/get_version.sh ldflags) -X 'google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn'"
-          export CGO_CFLAGS="-Wno-deprecated-declarations"
+          export CGO_CFLAGS="${CGO_CFLAGS:--Wno-deprecated-declarations}"
 
           BUILD_TAGS="sqlite_fts5"
           NSIS_FLAG=""
