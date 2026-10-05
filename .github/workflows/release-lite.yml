@@ -202,7 +202,7 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-            - name: Purge Go module cache (Windows)
+      - name: Purge Go module cache (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
